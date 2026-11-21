@@ -1,0 +1,8 @@
+build/
+managed_components/
+sdkconfig
+sdkconfig.old
+.impeccable/
+__pycache__/
+.ipynb_checkpoints/
+.vscode/
