@@ -1,18 +1,22 @@
-# Trọng số model (mảng C `.cc` + `.h`)
+# Trọng số model v9b của đội (mảng C `.cc` + `.h`)
 
-Repo đã kèm trọng số baseline. Thay model của đội: cần đủ 3 cặp file: `det_model.cc/.h`, `textcnn_model.cc/.h`, `vocab.cc/.h`.
+Thư mục này đang chứa model v9b của đội (không còn là baseline):
+- `det_model.cc/.h`    ← `detector_J_int8.tflite` (177.531 tham số, int8)
+- `textcnn_model.cc/.h` ← `intent_int8_v5.tflite` (TextCNN hash, 151 KB)
+- `vocab.cc/.h` của baseline **không còn được dùng** (v9b mã hóa câu hỏi bằng hàm băm trong `main/logic.c`).
 
-`baseline.ipynb` tự sinh ra ở 2 ô export (int8), copy vào đây rồi `idf.py build flash`:
-- Phần 1 Detection → `model_int8.tflite` + `det_model.cc/.h`
-- Phần 2 TextCNN → `textcnn_int8.tflite` + `textcnn_model.cc/.h` + `vocab.cc/.h` (luôn copy cùng nhau)
+Sinh lại từ file `.tflite`:
+```
+python tools/tflite_to_cc.py ../detector_J_int8.tflite det_model main/models
+python tools/tflite_to_cc.py ../intent_int8_v5.tflite textcnn_model main/models
+```
 
-(Đặt `cc_dir` trong ô export để ghi thẳng vào thư mục này.)
+Định dạng model v9b (khác baseline):
+- Detection: input int8 `1x240x320x3`, **pixel 0..255 lượng tử hóa trực tiếp** (scale 1, zp -128, không chia 255).
+  2 output int8: heatmap `1x60x80x7` và reg `1x60x80x4` (CenterNet stride 4) → `decode_v9b()` trong `main/logic.c`
+  (không lọc đỉnh 3x3, NMS theo lớp IoU 0,55). 7 lớp: `bottle cup phone book mouse box toy_car`.
+- TextCNN: input **int32 `[1,120]`** = 96 mã ký tự + 24 mã băm từ (FNV-1a % 2048 + 1) → `tokenize_v9b()`;
+  output 5 intent `COUNT EXIST LIST LOCATION OUT_OF_SCOPE` (float32).
 
-Yêu cầu khớp với firmware:
-- Detection: input int8 `1x240x320x3` (RGB/255), output NHWC `1x15x20x12` = obj, tx, ty, w, h + 7 class
-  theo thứ tự `bottle cup phone book mouse box toy_car`.
-- TextCNN (export qua Keras, không qua onnx2tf vì onnx2tf chèn op TFLite Micro không có và nối sai trục khi seq = emb = 32): input 32 token **int32** (token id; TFLite Micro không hỗ trợ int64 cho Gather), trọng số + output int8,
-  output 5 intent `COUNT EXIST LIST LOCATION OUT_OF_SCOPE`.
-
-Arena, ngưỡng conf/NMS, danh sách op: `main/model_config.h`.
-Đổi class/intent: sửa `CLASS_NAMES`, `INTENT_NAMES`, `KW`, `VN` trong `main/logic.c` và `NAMES` trong `main/index.html`.
+Kiểm tra trên máy (không cần board): xem `test/ref_v9b.py` (đối chiếu C với Python của notebook).
+Arena, ngưỡng, danh sách op: `main/model_config.h`.

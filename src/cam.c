@@ -32,6 +32,7 @@ static const char *TAG = "cam";
 #define CAM_PIN_HREF   15
 #define CAM_PIN_PCLK   13
 
+
 #define JPEG_QUALITY_PERCENT  (100 - (CONFIG_CAM_JPEG_QUALITY * 100 / 63))
 
 /* Thanh ghi chat luong anh OV7670 (gamma, AEC/AGC, AWB, ma tran mau) lay tu driver Linux
@@ -199,58 +200,3 @@ esp_err_t camera_web_start(void)
     return ESP_OK;
 }
 
-static void uart_send_base64(const uint8_t *data, size_t len)
-{
-    static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    char line[80];
-    size_t pos = 0;
-
-    for (size_t i = 0; i < len; i += 3) {
-        uint32_t v = ((uint32_t)data[i]) << 16;
-        if (i + 1 < len) v |= ((uint32_t)data[i + 1]) << 8;
-        if (i + 2 < len) v |= (uint32_t)data[i + 2];
-
-        line[pos++] = b64[(v >> 18) & 0x3F];
-        line[pos++] = b64[(v >> 12) & 0x3F];
-        line[pos++] = (i + 1 < len) ? b64[(v >> 6) & 0x3F] : '=';
-        line[pos++] = (i + 2 < len) ? b64[v & 0x3F] : '=';
-
-        if (pos >= 76) {
-            line[pos] = '\0';
-            printf("%s\n", line);
-            pos = 0;
-        }
-    }
-    if (pos > 0) {
-        line[pos] = '\0';
-        printf("%s\n", line);
-    }
-}
-
-esp_err_t cam_capture_and_send_uart(void)
-{
-    camera_fb_t *fb = esp_camera_fb_get();
-    if (!fb) {
-        ESP_LOGE(TAG, "Chup anh that bai");
-        return ESP_FAIL;
-    }
-
-    uint8_t *jpg = NULL;
-    size_t jpg_len = 0;
-    bool ok = frame2jpg(fb, 90, &jpg, &jpg_len);
-    esp_camera_fb_return(fb);
-
-    if (!ok || !jpg) {
-        ESP_LOGE(TAG, "Nen JPEG that bai");
-        return ESP_FAIL;
-    }
-
-    printf("\n<<<IMG_START len=%u>>>\n", (unsigned)jpg_len);
-    uart_send_base64(jpg, jpg_len);
-    printf("<<<IMG_END>>>\n");
-    fflush(stdout);
-
-    free(jpg);
-    ESP_LOGI(TAG, "Da gui anh %u bytes qua UART", (unsigned)jpg_len);
-    return ESP_OK;
-}

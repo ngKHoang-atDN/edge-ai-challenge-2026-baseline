@@ -11,3 +11,5 @@ idf_component_register(
     EMBED_FILES "index.html"
     REQUIRES esp_wifi esp_netif esp_event nvs_flash esp_http_server esp_timer
 )
+
+set_source_files_properties(infer.cc logic.c PROPERTIES COMPILE_FLAGS "-O2")

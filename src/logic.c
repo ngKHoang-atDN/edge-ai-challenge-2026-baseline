@@ -87,6 +87,111 @@ void tokenize(const char *norm, const char *const *vocab, int nv, int32_t ids[SE
     }
 }
 
+/* ===== Model v9b: decode CenterNet stride 4 (= decode_v9b trong edgeai-v9b-train.ipynb) ===== */
+typedef struct { float s; int cell; int c; } v9b_cand_t;
+
+static int by_cand(const void *a, const void *b)
+{
+    float d = ((const v9b_cand_t *)b)->s - ((const v9b_cand_t *)a)->s;
+    return (d > 0) - (d < 0);
+}
+
+int decode_v9b(const int8_t *hm, float hm_scale, int hm_zp,
+               const int8_t *reg, float reg_scale, int reg_zp,
+               float thr, float iou, det_t *out, int max)
+{
+    enum { CELLS = V9B_GH * V9B_GW };
+    static v9b_cand_t cand[V9B_CAP];
+    static det_t tmp[V9B_CAP];
+    if (thr <= 0.f || thr >= 1.f) return 0;
+
+    /* nguong logit -> nguong luong tu: giu o co logit >= ln(thr/(1-thr)) */
+    float lt = logf(thr / (1.f - thr));
+    int qt = (int)ceilf(lt / hm_scale + (float)hm_zp);
+    if (qt < -128) qt = -128;
+    if (qt > 127) return 0;
+
+    /* histogram int8 de tim nguong q_cut sao cho co <= V9B_CAP o diem cao nhat (khong can sap xep 33600 o) */
+    int hist[256] = {0};
+    for (int i = 0; i < CELLS * NUM_CLASSES; i++) if (hm[i] >= qt) hist[hm[i] + 128]++;
+    int acc = 0, q_cut = qt;
+    for (int q = 127; q >= qt; q--) {
+        acc += hist[q + 128];
+        if (acc >= V9B_CAP) { q_cut = q; break; }
+    }
+    int n = 0;
+    for (int i = 0; i < CELLS * NUM_CLASSES && n < V9B_CAP; i++) {
+        if (hm[i] < q_cut) continue;
+        float logit = ((int)hm[i] - hm_zp) * hm_scale;
+        cand[n++] = (v9b_cand_t){sig(logit), i / NUM_CLASSES, i % NUM_CLASSES};
+    }
+    qsort(cand, n, sizeof(v9b_cand_t), by_cand);
+
+    int m = 0;
+    for (int k = 0; k < n; k++) {
+        int cell = cand[k].cell, y = cell / V9B_GW, x = cell % V9B_GW;
+        const int8_t *r = reg + cell * 4;
+        float r0 = ((int)r[0] - reg_zp) * reg_scale, r1 = ((int)r[1] - reg_zp) * reg_scale;
+        float r2 = ((int)r[2] - reg_zp) * reg_scale, r3 = ((int)r[3] - reg_zp) * reg_scale;
+        float w = fmaxf(r0, 0.05f) * 10.f * V9B_STRIDE, h = fmaxf(r1, 0.05f) * 10.f * V9B_STRIDE;
+        float cx = (x + clamp01(r2)) * V9B_STRIDE, cy = (y + clamp01(r3)) * V9B_STRIDE;
+        float x1 = fmaxf(cx - w / 2, 0.f), y1 = fmaxf(cy - h / 2, 0.f);
+        float x2 = fminf(cx + w / 2, (float)V9B_W), y2 = fminf(cy + h / 2, (float)V9B_H);
+        if (x2 <= x1 || y2 <= y1) continue;
+        tmp[m++] = (det_t){cand[k].c, cand[k].s, x1 / V9B_W, y1 / V9B_H, x2 / V9B_W, y2 / V9B_H};
+    }
+    /* NMS theo lop (tmp da sap giam dan theo diem) */
+    int keep = 0;
+    for (int i = 0; i < m && keep < max; i++) {
+        int ok = 1;
+        for (int j = 0; j < keep && ok; j++)
+            if (out[j].cls == tmp[i].cls && box_iou(&out[j], &tmp[i]) > iou) ok = 0;
+        if (ok) out[keep++] = tmp[i];
+    }
+    return keep;
+}
+
+/* ===== Model v9b: ma hoa cau hoi = 96 ma ky tu + 24 ma bam tu (FNV-1a % 2048 + 1) ===== */
+static uint32_t fnv1a(const char *s, size_t n)
+{
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < n; i++) { h ^= (uint8_t)s[i]; h *= 16777619u; }
+    return h;
+}
+
+void tokenize_v9b(const char *norm, int32_t ids[V9B_SEQ_LEN])
+{
+    enum { ML = 96, MLW = 24, MAXT = 400 };
+    char t[MAXT + 1];               /* chuoi chuan hoa day du (ma tu lay tu day du; ma ky tu chi lay 96 ky tu dau) */
+    int len = 0, pending_space = 0;
+    memset(ids, 0, V9B_SEQ_LEN * sizeof(int32_t));
+    for (const char *p = norm; *p && len < MAXT - 1; p++) {
+        char c = *p;
+        if (c >= 'A' && c <= 'Z') c = c - 'A' + 'a';
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+            if (pending_space && len > 0) t[len++] = ' ';
+            pending_space = 0;
+            t[len++] = c;
+        } else {
+            pending_space = 1;      /* moi ky tu khac (ke ca '_') = khoang trang; bo khoang trang dau/cuoi/lap */
+        }
+    }
+    t[len] = 0;
+    /* ma ky tu: ' '->2, 'a'..'z'->3..28, '0'..'9'->29..38 (CH = " abcdefghijklmnopqrstuvwxyz0123456789") */
+    for (int i = 0; i < len && i < ML; i++) {
+        char c = t[i];
+        ids[i] = c == ' ' ? 2 : (c <= '9' ? 29 + (c - '0') : 3 + (c - 'a'));
+    }
+    /* ma tu: toi da 24 tu */
+    int w = 0;
+    for (int i = 0; i < len && w < MLW;) {
+        int j = i;
+        while (j < len && t[j] != ' ') j++;
+        if (j > i) ids[ML + w++] = (int32_t)(fnv1a(t + i, (size_t)(j - i)) % 2048u + 1u);
+        i = j + 1;
+    }
+}
+
 static int has_word(const char *norm, const char *w)
 {
     size_t len = strlen(w);

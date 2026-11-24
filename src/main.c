@@ -179,13 +179,4 @@ void app_main(void)
     if (camera_web_start() != ESP_OK) {
         ESP_LOGW(TAG, "Khong co camera -> web chi dung anh tai len");
     }
-    //comment lại block else khi ko can chup  
-    else {
-        ESP_LOGI(TAG, "San sang chup UART: nhan 'c' hoac 'C' de chup anh");
-        while (1) {
-            int ch = getchar();
-            if (ch == 'c' || ch == 'C') cam_capture_and_send_uart();
-            else if (ch == EOF) vTaskDelay(pdMS_TO_TICKS(20));
-        }
-    }
 }
